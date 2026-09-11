@@ -60,10 +60,14 @@ cleanup_downloads_env = os.getenv("CLEANUP_DOWNLOADS", "false").lower() in {
     "on",
 }
 
-try:
-    backfill_limit_env = int(os.getenv("BACKFILL_LIMIT", "0"))
-except ValueError:
-    backfill_limit_env = 0
+raw_backfill = os.getenv("BACKFILL_LIMIT", "0").strip().lower()
+if raw_backfill in {"all", "full", "max"}:
+    backfill_limit_env = "all"
+else:
+    try:
+        backfill_limit_env = int(raw_backfill)
+    except ValueError:
+        backfill_limit_env = 0
 
 try:
     rate_limit_delay_env = float(
@@ -106,9 +110,9 @@ def parse_args():
     )
     parser.add_argument(
         "--backfill",
-        type=int,
+        type=str,
         default=None,
-        help="Number of recent messages to backfill/forward from monitored groups on startup",
+        help="Number of recent messages or 'all' to backfill/forward from monitored groups on startup (e.g. 50, all)",
     )
     parser.add_argument(
         "--cleanup",
@@ -155,7 +159,18 @@ forward_media_only = (
     args.media_only if args.media_only is not None else forward_media_only_env
 )
 forward_mode = args.mode if args.mode is not None else forward_mode_env
-backfill_limit = args.backfill if args.backfill is not None else backfill_limit_env
+
+if args.backfill is not None:
+    raw_arg = str(args.backfill).strip().lower()
+    if raw_arg in {"all", "full", "max"}:
+        backfill_limit = "all"
+    elif raw_arg.isdigit():
+        backfill_limit = int(raw_arg)
+    else:
+        backfill_limit = 0
+else:
+    backfill_limit = backfill_limit_env
+
 cleanup_downloads = (
     args.cleanup if args.cleanup is not None else cleanup_downloads_env
 )
@@ -890,39 +905,45 @@ async def list_chats_and_exit(client_instance):
 
 
 async def perform_backfill(client_instance, target_ids, limit):
-    """Backfills/forwards the last N messages from monitored groups on startup."""
-    print(f"\n[Backfill] Starting catch-up for {len(target_ids)} group(s) (limit: {limit} messages each)...")
+    """Backfills/forwards messages from monitored groups on startup (either last N or ALL from the beginning)."""
+    limit_val = (
+        None
+        if limit in {"all", None}
+        else (int(limit) if str(limit).isdigit() else 20)
+    )
+    label = (
+        "ALL historical messages from the beginning"
+        if limit_val is None
+        else f"last {limit_val} messages"
+    )
+    print(f"\n[Backfill] Starting catch-up for {len(target_ids)} group(s) ({label})...")
+
     for chat_id in target_ids:
         try:
             entity = await client_instance.get_entity(chat_id)
             title = getattr(entity, "title", str(chat_id))
-            print(f"[Backfill] Fetching last {limit} messages from '{title}' ({chat_id})...")
+            print(f"[Backfill] Scanning {label} from '{title}' ({chat_id})...")
 
-            msgs = []
-            async for msg in client_instance.iter_messages(entity, limit=limit):
-                msgs.append(msg)
-            msgs.reverse()
-
-            saved_count = 0
-            for msg in msgs:
-                if msg.action or (forward_media_only and not msg.media):
-                    continue
-                try:
-                    saved = await forward_or_save_message(
-                        msg,
-                        source_label=title,
-                        mode=forward_mode,
-                        force_doc=force_document,
-                        cleanup=cleanup_downloads,
+            async def backfill_progress(processed, saved, done):
+                if not done:
+                    print(
+                        f"\r  [Backfill] '{title}': Scanned {processed} msgs | Saved {saved} items...",
+                        end="",
+                        flush=True,
                     )
-                    if saved:
-                        saved_count += 1
-                except Exception as e:
-                    print(f"  [Backfill] Error saving message {msg.id}: {e}")
-            print(f"[Backfill] Completed '{title}': saved {saved_count} message(s).")
+                else:
+                    print(f"\n  [Backfill] '{title}': Finished! Saved {saved} item(s).")
+
+            await batch_save_chat_messages(
+                client_instance,
+                entity,
+                limit=limit_val,
+                media_only=forward_media_only,
+                progress_callback=backfill_progress,
+            )
         except Exception as e:
-            print(f"[Backfill] Failed for target {chat_id}: {e}")
-    print("[Backfill] Backfill catch-up process complete.\n")
+            print(f"\n[Backfill] Failed for target {chat_id}: {e}")
+    print("[Backfill] Catch-up process complete.\n")
 
 
 async def main():
@@ -983,7 +1004,7 @@ async def main():
             print(f"  • Cleanup local downloads: {cleanup_downloads}")
             await resolve_monitored_groups(client, targets)
 
-            if backfill_limit > 0:
+            if backfill_limit == "all" or (isinstance(backfill_limit, int) and backfill_limit > 0):
                 await perform_backfill(client, list(resolved_group_ids), backfill_limit)
         else:
             print("\nGroup auto-forwarding: disabled (no FORWARD_GROUP_IDS configured)")

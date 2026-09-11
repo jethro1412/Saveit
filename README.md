@@ -107,7 +107,7 @@ All settings can be configured in `.env`. Here is the full list of supported par
 | `FORWARD_GROUP_IDS` | String | *Empty* | Comma-separated list of group/channel IDs or usernames to monitor (e.g. `-1001234567890, @python_tutorials`). Aliases: `FORWARD_GROUPS`, `FORWARD_CHATS`, `WATCH_GROUPS`. |
 | `FORWARD_MEDIA_ONLY` | Boolean | `false` | If `true`, only forwards messages containing media. If `false`, forwards all content including text tutorials and code blocks. |
 | `FORWARD_MODE` | String | `forward` | `forward`: Native Telegram forward with auto-fallback to download/upload if restricted. `copy`: Always download and re-upload directly. |
-| `BACKFILL_LIMIT` | Integer | `0` | Number of recent messages to fetch from monitored groups on startup (`0` = disabled). |
+| `BACKFILL_LIMIT` | Integer / String | `0` | Number of recent messages (e.g. `50`) or `'all'` to backfill from the very beginning of monitored groups on startup (`0` = disabled, listens only for new messages). |
 | `FORCE_DOCUMENT` | Boolean | `true` | Sends files as uncompressed documents to maintain 100% original quality. |
 | `CLEANUP_DOWNLOADS` | Boolean | `false` | Automatically deletes downloaded files from `downloads/` after sending them to Saved Messages. |
 | `TRACKER_DB` | String | `saveit_tracker.db` | Local SQLite database file for tracking messages, Telegram file IDs, and SHA-256 hashes to prevent duplicates. |
@@ -135,6 +135,9 @@ python3 Saveit.py --forward-groups "-1001234567890,@learngolang"
 
 # Catch up on the last 50 tutorial messages on startup
 python3 Saveit.py --backfill 50
+
+# Scan and archive ALL messages from the very beginning of monitored groups on startup
+python3 Saveit.py --backfill all
 
 # Forward only messages containing media (videos, PDFs, code files, diagrams)
 python3 Saveit.py --media-only
