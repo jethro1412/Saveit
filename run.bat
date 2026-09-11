@@ -22,9 +22,11 @@ IF NOT EXIST ".env" (
     set /p API_ID="Enter your API_ID: "
     set /p API_HASH="Enter your API_HASH: "
     set /p HANDLER="Enter your HANDLER (e.g., .saveit): "
+    set /p FORWARD_GROUP_IDS="Enter FORWARD_GROUP_IDS (optional, e.g. -1001234567890,@learnpython): "
     powershell -Command "(gc .env) -replace 'API_ID=.*','API_ID=%API_ID%' | Out-File -encoding ASCII .env"
     powershell -Command "(gc .env) -replace 'API_HASH=.*','API_HASH=%API_HASH%' | Out-File -encoding ASCII .env"
     powershell -Command "(gc .env) -replace 'HANDLER=.*','HANDLER=%HANDLER%' | Out-File -encoding ASCII .env"
+    powershell -Command "(gc .env) -replace 'FORWARD_GROUP_IDS=.*','FORWARD_GROUP_IDS=%FORWARD_GROUP_IDS%' | Out-File -encoding ASCII .env"
 )
 
 pip install --upgrade telethon python-dotenv

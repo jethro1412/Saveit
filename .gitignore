@@ -1,0 +1,23 @@
+# Environment & Secrets
+.env
+
+# Telethon session data
+*.session
+*.session-journal
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Downloads directory
+downloads/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Graphify build outputs
+graphify-out/
+

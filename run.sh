@@ -22,15 +22,22 @@ if [ ! -f ".env" ]; then
     read -p "API_ID: " api_id
     read -p "API_HASH: " api_hash
     read -p "HANDLER (e.g., .saveit): " handler
+    read -p "FORWARD_GROUP_IDS (optional, e.g. -1001234567890,@learnpython): " forward_group_ids
 
     if [[ "$OSTYPE" == "darwin"* ]]; then
         sed -i '' "s/API_ID=.*/API_ID=$api_id/" .env
         sed -i '' "s/API_HASH=.*/API_HASH=$api_hash/" .env
         sed -i '' "s/HANDLER=.*/HANDLER=$handler/" .env
+        if [ -n "$forward_group_ids" ]; then
+            sed -i '' "s/FORWARD_GROUP_IDS=.*/FORWARD_GROUP_IDS=$forward_group_ids/" .env
+        fi
     else
         sed -i "s/API_ID=.*/API_ID=$api_id/" .env
         sed -i "s/API_HASH=.*/API_HASH=$api_hash/" .env
         sed -i "s/HANDLER=.*/HANDLER=$handler/" .env
+        if [ -n "$forward_group_ids" ]; then
+            sed -i "s/FORWARD_GROUP_IDS=.*/FORWARD_GROUP_IDS=$forward_group_ids/" .env
+        fi
     fi
 fi
 
