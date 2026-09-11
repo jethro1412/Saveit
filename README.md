@@ -109,7 +109,7 @@ All settings can be configured in `.env`. Here is the full list of supported par
 | `FORWARD_MODE` | String | `forward` | `forward`: Native Telegram forward with auto-fallback to download/upload if restricted. `copy`: Always download and re-upload directly. |
 | `BACKFILL_LIMIT` | Integer / String | `0` | Number of recent messages (e.g. `50`) or `'all'` to backfill from the very beginning of monitored groups on startup (`0` = disabled, listens only for new messages). |
 | `FORCE_DOCUMENT` | Boolean | `true` | Sends files as uncompressed documents to maintain 100% original quality. |
-| `CLEANUP_DOWNLOADS` | Boolean | `false` | Automatically deletes downloaded files from `downloads/` after sending them to Saved Messages. |
+| `CLEANUP_DOWNLOADS` | Boolean | `true` | Automatically deletes downloaded files and removes the empty `downloads/` directory after sending them to Saved Messages. |
 | `TRACKER_DB` | String | `saveit_tracker.db` | Local SQLite database file for tracking messages, Telegram file IDs, and SHA-256 hashes to prevent duplicates. |
 | `RATE_LIMIT_DELAY` | Float | `1.5` | Minimum seconds between outgoing Telegram actions (forwards, uploads, messages) to prevent flood limits. |
 | `FLOOD_SLEEP_THRESHOLD` | Integer | `60` | Maximum seconds Telethon will automatically pause and retry when encountering Telegram `FloodWaitError`. |
@@ -145,8 +145,8 @@ python3 Saveit.py --media-only
 # Customize the rate limit delay between actions (e.g. 2.0 seconds)
 python3 Saveit.py --rate-limit 2.0
 
-# Automatically delete local downloaded files after re-uploading
-python3 Saveit.py --cleanup
+# Keep local downloaded files on disk (cleanup is enabled by default)
+python3 Saveit.py --no-cleanup
 
 # Save ALL media from an entire group/channel to Saved Messages, then exit
 python3 Saveit.py --save-all-media -1001234567890
@@ -261,7 +261,7 @@ No. Saveit defaults to `FORCE_DOCUMENT=true`, ensuring tutorial videos, PDFs, an
 Many educational groups enable Telegram's "Restrict saving content" setting (`noforwards`). When detected, Saveit seamlessly downloads the media locally and uploads it to your Saved Messages, preserving all accompanying lesson explanations and code snippets.
 
 ### 4. How can I save disk space?
-If you monitor groups with gigabytes of video lessons, set `CLEANUP_DOWNLOADS=true` in your `.env` or pass `--cleanup` on the command line. This deletes each local file immediately after it has been safely uploaded to your Saved Messages.
+`CLEANUP_DOWNLOADS=true` is enabled by default. Saveit automatically deletes each local file immediately after uploading it to your Saved Messages, and automatically removes the empty `downloads/` directory. If you ever want to retain downloaded copies locally, pass `--no-cleanup` or set `CLEANUP_DOWNLOADS=false` in your `.env`.
 
 ---
 

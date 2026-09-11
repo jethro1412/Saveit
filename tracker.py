@@ -121,13 +121,17 @@ class FileTracker:
             )
 
     @staticmethod
-    def compute_sha256(file_path: str) -> str:
-        """Computes SHA-256 hash of a file efficiently using 64KB chunks."""
-        sha256 = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            while chunk := f.read(65536):
-                sha256.update(chunk)
-        return sha256.hexdigest()
+    def compute_sha256(file_path: str) -> Optional[str]:
+        """Computes SHA-256 hash of a file safely using 64KB chunks."""
+        try:
+            sha256 = hashlib.sha256()
+            with open(file_path, "rb") as f:
+                while chunk := f.read(65536):
+                    sha256.update(chunk)
+            return sha256.hexdigest()
+        except Exception as err:
+            print(f"Warning: Could not compute SHA-256 for {file_path}: {err}")
+            return None
 
     def get_stats(self) -> dict:
         """Returns aggregate statistics about archived records and storage."""

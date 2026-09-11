@@ -3,7 +3,9 @@ import asyncio
 import os
 import random
 import re
+import shutil
 import sys
+import traceback
 from pathlib import Path
 
 from tracker import FileTracker, extract_telegram_file_id
@@ -53,7 +55,7 @@ force_document_env = os.getenv("FORCE_DOCUMENT", "true").lower() in {
     "yes",
     "on",
 }
-cleanup_downloads_env = os.getenv("CLEANUP_DOWNLOADS", "false").lower() in {
+cleanup_downloads_env = os.getenv("CLEANUP_DOWNLOADS", "true").lower() in {
     "1",
     "true",
     "yes",
@@ -118,7 +120,13 @@ def parse_args():
         "--cleanup",
         action="store_true",
         default=None,
-        help="Clean up downloaded files in downloads/ after uploading to Saved Messages",
+        help="Clean up downloaded files and remove the downloads/ directory after uploading to Saved Messages (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-cleanup",
+        action="store_true",
+        default=False,
+        help="Disable automatic cleanup of downloaded files and the downloads/ directory",
     )
     parser.add_argument(
         "--list-chats",
@@ -171,9 +179,12 @@ if args.backfill is not None:
 else:
     backfill_limit = backfill_limit_env
 
-cleanup_downloads = (
-    args.cleanup if args.cleanup is not None else cleanup_downloads_env
-)
+if args.no_cleanup:
+    cleanup_downloads = False
+elif args.cleanup is not None:
+    cleanup_downloads = args.cleanup
+else:
+    cleanup_downloads = cleanup_downloads_env
 force_document = force_document_env
 rate_limit_delay = (
     args.rate_limit if args.rate_limit is not None else rate_limit_delay_env
@@ -330,9 +341,84 @@ def is_timed_media(message):
     """Telegram exposes the self-destruct timer on the media object."""
     return bool(
         message
-        and message.media
+        and getattr(message, "media", None)
         and getattr(message.media, "ttl_seconds", None)
     )
+
+
+def is_downloadable_file(message):
+    """Determines whether a message contains an actual downloadable media file (document, video, audio, photo)."""
+    if not message or not getattr(message, "media", None):
+        return False
+    media = message.media
+    media_name = type(media).__name__
+    if media_name in {
+        "MessageMediaWebPage",
+        "MessageMediaContact",
+        "MessageMediaGeo",
+        "MessageMediaGeoLive",
+        "MessageMediaPoll",
+        "MessageMediaDice",
+        "MessageMediaGame",
+        "MessageMediaInvoice",
+        "MessageMediaUnsupported",
+        "MessageMediaEmpty",
+    }:
+        return False
+    if hasattr(media, "document") and media.document is not None:
+        return True
+    if hasattr(media, "photo") and media.photo is not None:
+        return True
+    return False
+
+
+def get_media_size(message):
+    """Extracts file size in bytes from Telegram media metadata without downloading."""
+    if not message or not getattr(message, "media", None):
+        return None
+    media = message.media
+    if hasattr(media, "document") and media.document:
+        return getattr(media.document, "size", None)
+    return None
+
+
+def cleanup_temp_file(file_path):
+    """Safely removes a temporary downloaded file if it exists."""
+    if not file_path:
+        return
+    try:
+        p = Path(file_path)
+        if p.exists() and p.is_file():
+            p.unlink(missing_ok=True)
+    except Exception as err:
+        print(f"Warning: Could not remove temporary file {file_path}: {err}")
+
+
+def cleanup_empty_downloads_dir():
+    """Removes the downloads directory if it exists and contains no files."""
+    try:
+        if downloads_path.exists() and downloads_path.is_dir():
+            if not any(downloads_path.iterdir()):
+                downloads_path.rmdir()
+    except Exception:
+        pass
+
+
+def purge_downloads_folder():
+    """Purges any lingering files in downloads/ folder and removes the directory."""
+    try:
+        if downloads_path.exists() and downloads_path.is_dir():
+            for item in downloads_path.iterdir():
+                try:
+                    if item.is_file() or item.is_symlink():
+                        item.unlink(missing_ok=True)
+                    elif item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                except Exception:
+                    pass
+            downloads_path.rmdir()
+    except Exception:
+        pass
 
 
 async def forward_or_save_message(
@@ -340,7 +426,7 @@ async def forward_or_save_message(
     source_label=None,
     mode="forward",
     force_doc=True,
-    cleanup=False,
+    cleanup=True,
 ):
     """
     Forwards or copies a message to Saved Messages ('me').
@@ -348,6 +434,7 @@ async def forward_or_save_message(
     If forwarding is restricted by channel/group ('noforwards' protection),
     automatically falls back to downloading media and sending as original file or copying text.
     Tracks all saved messages, Telegram File IDs, and SHA-256 hashes in SQLite.
+    Guarantees cleanup of temporary downloads in finally blocks.
     """
     message_key = (message.chat_id, message.id)
 
@@ -390,22 +477,61 @@ async def forward_or_save_message(
                 print(f"[Fallback] Direct forward failed ({e}); falling back to copy/download...")
 
         # 2. Copy/Download mode (or fallback after restricted forward)
-        if message.media:
+        if is_downloadable_file(message):
+            media_size = get_media_size(message)
+            if media_size and media_size > 2000 * 1024 * 1024:
+                print(
+                    f"[File Too Large] Message {message.id} media is {media_size / (1024 * 1024):.1f} MB "
+                    f"(exceeds Telegram standard 2GB upload limit). Skipping download."
+                )
+                return False
+
             downloads_path.mkdir(parents=True, exist_ok=True)
-            file_path = await call_with_rate_limit(
-                client.download_media, message, file=str(downloads_path)
-            )
-            if not file_path:
-                raise RuntimeError("Telegram did not return a downloadable file")
+            file_path = None
+            try:
+                file_path = await call_with_rate_limit(
+                    client.download_media, message, file=str(downloads_path)
+                )
+                if not file_path:
+                    print(f"[Download Warning] Telegram could not download media for message {message.id}.")
+                    return False
 
-            path_obj = Path(file_path)
-            file_size = path_obj.stat().st_size
-            file_name = path_obj.name
-            file_hash = tracker.compute_sha256(file_path)
+                path_obj = Path(file_path)
+                file_size = path_obj.stat().st_size
+                file_name = path_obj.name
+                file_hash = tracker.compute_sha256(file_path)
 
-            if tracker.is_file_hash_saved(file_hash):
-                print(f"[Duplicate Skipped] Content SHA-256 ({file_hash[:10]}...) already saved; skipping re-upload.")
-                path_obj.unlink(missing_ok=True)
+                if file_hash and tracker.is_file_hash_saved(file_hash):
+                    print(f"[Duplicate Skipped] Content SHA-256 ({file_hash[:10]}...) already saved; skipping re-upload.")
+                    tracker.record_saved(
+                        chat_id=message.chat_id,
+                        message_id=message.id,
+                        telegram_file_id=telegram_file_id,
+                        file_name=file_name,
+                        file_size=file_size,
+                        file_hash=file_hash,
+                        caption=message.text,
+                    )
+                    return False
+
+                caption = message.text or (f"File saved from {source_label}" if source_label else "")
+                full_text = None
+                # Standard Telegram caption limit is 1024 characters for free accounts
+                if len(caption) > 1024:
+                    full_text = caption
+                    caption = caption[:1020] + "..."
+
+                await call_with_rate_limit(
+                    client.send_file,
+                    "me",
+                    file_path,
+                    caption=caption if caption else None,
+                    force_document=force_doc,
+                )
+
+                if full_text:
+                    await call_with_rate_limit(client.send_message, "me", full_text)
+
                 tracker.record_saved(
                     chat_id=message.chat_id,
                     message_id=message.id,
@@ -413,50 +539,18 @@ async def forward_or_save_message(
                     file_name=file_name,
                     file_size=file_size,
                     file_hash=file_hash,
-                    caption=message.text,
+                    caption=caption,
                 )
-                return False
 
-            caption = message.text or (f"File saved from {source_label}" if source_label else "")
-            full_text = None
-            # Standard Telegram caption limit is 1024 characters for free accounts
-            if len(caption) > 1024:
-                full_text = caption
-                caption = caption[:1020] + "..."
-
-            await call_with_rate_limit(
-                client.send_file,
-                "me",
-                file_path,
-                caption=caption if caption else None,
-                force_document=force_doc,
-            )
-
-            if full_text:
-                await call_with_rate_limit(client.send_message, "me", full_text)
-
-            tracker.record_saved(
-                chat_id=message.chat_id,
-                message_id=message.id,
-                telegram_file_id=telegram_file_id,
-                file_name=file_name,
-                file_size=file_size,
-                file_hash=file_hash,
-                caption=caption,
-            )
-
-            print(f"[Saved Media] Message {message.id} from chat {message.chat_id}: {file_path}")
-
-            if cleanup:
-                try:
-                    path_obj.unlink(missing_ok=True)
-                except Exception as del_err:
-                    print(f"Warning: Could not remove temporary file {file_path}: {del_err}")
-
-            return True
+                print(f"[Saved Media] Message {message.id} from chat {message.chat_id}: {file_name}")
+                return True
+            finally:
+                if cleanup:
+                    cleanup_temp_file(file_path)
+                    cleanup_empty_downloads_dir()
 
         elif message.text:
-            # Text tutorial/code snippet without media
+            # Text tutorial/code snippet without downloadable media file
             chat_title = source_label or str(message.chat_id)
             header = f"📚 **[{chat_title}]**\n\n"
             await call_with_rate_limit(client.send_message, "me", header + message.text)
@@ -477,14 +571,15 @@ async def forward_or_save_message(
         async with save_lock:
             saved_message_ids.discard(message_key)
         raise
-    except Exception:
+    except Exception as err:
         async with save_lock:
             saved_message_ids.discard(message_key)
-        raise
+        print(f"[Error] Failed to forward/save message {message.id} from {message.chat_id}: {err}")
+        return False
 
 
 async def save_media(message, sender_id):
-    """Saves media locally and sends to Saved Messages (preserves original behavior)."""
+    """Saves media locally and sends to Saved Messages with guaranteed cleanup & crash protection."""
     message_key = (message.chat_id, message.id)
 
     async with save_lock:
@@ -504,23 +599,36 @@ async def save_media(message, sender_id):
         )
         return
 
+    if not is_downloadable_file(message):
+        print(f"[Save Skipped] Message {message.id} does not contain downloadable media.")
+        return
+
+    media_size = get_media_size(message)
+    if media_size and media_size > 2000 * 1024 * 1024:
+        print(
+            f"[File Too Large] Message {message.id} media is {media_size / (1024 * 1024):.1f} MB "
+            f"(exceeds Telegram standard 2GB upload limit). Skipping."
+        )
+        return
+
     downloads_path.mkdir(parents=True, exist_ok=True)
+    file_path = None
 
     try:
         file_path = await call_with_rate_limit(
             client.download_media, message, file=str(downloads_path)
         )
         if not file_path:
-            raise RuntimeError("Telegram did not return a downloadable file")
+            print(f"[Download Warning] Telegram could not download media for message {message.id}.")
+            return
 
         path_obj = Path(file_path)
         file_size = path_obj.stat().st_size
         file_name = path_obj.name
         file_hash = tracker.compute_sha256(file_path)
 
-        if tracker.is_file_hash_saved(file_hash):
+        if file_hash and tracker.is_file_hash_saved(file_hash):
             print(f"[Duplicate Skipped] Content SHA-256 ({file_hash[:10]}...) already saved; skipping upload.")
-            path_obj.unlink(missing_ok=True)
             tracker.record_saved(
                 chat_id=message.chat_id,
                 message_id=message.id,
@@ -550,15 +658,16 @@ async def save_media(message, sender_id):
             caption=caption_text,
         )
         print(f"Saved media from {sender_id}: {file_path}")
-        if cleanup_downloads:
-            try:
-                path_obj.unlink(missing_ok=True)
-            except Exception:
-                pass
-    except Exception:
+
+    except Exception as err:
         async with save_lock:
             saved_message_ids.discard(message_key)
+        print(f"[Error] Failed to save media {message.id}: {err}")
         raise
+    finally:
+        if cleanup_downloads:
+            cleanup_temp_file(file_path)
+            cleanup_empty_downloads_dir()
 
 
 @client.on(events.NewMessage(incoming=True))
@@ -592,7 +701,7 @@ async def auto_forward_group_message(event):
         return
 
     # Check media filter if enabled
-    if forward_media_only and not event.message.media:
+    if forward_media_only and not is_downloadable_file(event.message):
         return
 
     source_label = monitored_chat_names.get(event.chat_id)
@@ -642,7 +751,7 @@ async def batch_save_chat_messages(
 
         for msg in msgs:
             total_processed += 1
-            if msg.action or (media_only and not msg.media):
+            if msg.action or (media_only and not is_downloadable_file(msg)):
                 continue
             try:
                 saved = await forward_or_save_message(
@@ -671,7 +780,7 @@ async def batch_save_chat_messages(
         # Stream from oldest to newest across ALL messages in the chat
         async for msg in client_instance.iter_messages(entity, reverse=True):
             total_processed += 1
-            if msg.action or (media_only and not msg.media):
+            if msg.action or (media_only and not is_downloadable_file(msg)):
                 continue
             try:
                 saved = await forward_or_save_message(
@@ -699,6 +808,9 @@ async def batch_save_chat_messages(
 
     if progress_callback:
         await progress_callback(total_processed, total_saved, True)
+
+    if cleanup_downloads:
+        cleanup_empty_downloads_dir()
 
     return total_processed, total_saved, title
 
@@ -864,8 +976,8 @@ async def handle_userbot_command(event):
         message = await event.get_reply_message()
         await event.delete()
 
-        if not message or not message.media:
-            await status.edit("No media found in the replied message.")
+        if not message or not is_downloadable_file(message):
+            await status.edit("No downloadable media found in the replied message.")
             return
 
         try:
@@ -946,75 +1058,113 @@ async def perform_backfill(client_instance, target_ids, limit):
     print("[Backfill] Catch-up process complete.\n")
 
 
+async def run_client_with_reconnect():
+    """Keeps client listening with auto-reconnection shield against network drops."""
+    retry_delay = 3
+    while True:
+        try:
+            await client.run_until_disconnected()
+            break
+        except (ConnectionError, OSError, asyncio.TimeoutError) as net_err:
+            print(f"\n[Connection Notice] Network disconnected ({net_err}). Reconnecting in {retry_delay}s...")
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+            try:
+                if not client.is_connected():
+                    await client.connect()
+                print("[Connection Notice] Successfully reconnected to Telegram.")
+                retry_delay = 3
+            except Exception as reconn_err:
+                print(f"[Connection Error] Reconnect attempt failed: {reconn_err}")
+        except asyncio.CancelledError:
+            break
+        except Exception as unhandled:
+            print(f"\n[Crash Shield] Recovering from unexpected error: {unhandled}")
+            traceback.print_exc()
+            await asyncio.sleep(5)
+
+
 async def main():
     global your_user_id
 
-    async with client:
-        if args.list_chats:
-            await list_chats_and_exit(client)
-            return
+    if cleanup_downloads:
+        cleanup_empty_downloads_dir()
 
-        me = await client.get_me()
-        your_user_id = me.id
+    try:
+        async with client:
+            if args.list_chats:
+                await list_chats_and_exit(client)
+                return
 
-        if args.save_all_media:
-            target = args.save_all_media
-            target_entity = int(target) if (target.startswith("-") or target.isdigit()) else target
+            me = await client.get_me()
+            your_user_id = me.id
+
+            if args.save_all_media:
+                target = args.save_all_media
+                target_entity = int(target) if (target.startswith("-") or target.isdigit()) else target
+                print("=" * 65)
+                print(f"Logged in as: {me.username or me.first_name} (User ID: {your_user_id})")
+                print(f"Scanning and saving ALL media from '{target}' to Saved Messages...")
+                print("=" * 65)
+
+                async def cli_progress(processed, saved, done):
+                    if not done:
+                        print(f"\r[Save-All] Scanned {processed} messages | Saved {saved} media files...", end="", flush=True)
+                    else:
+                        print(f"\n[Save-All] Done! Successfully saved {saved} media files to Saved Messages.")
+
+                try:
+                    await batch_save_chat_messages(
+                        client,
+                        target_entity,
+                        limit=None,
+                        media_only=True,
+                        progress_callback=cli_progress,
+                    )
+                except Exception as err:
+                    print(f"\n[Save-All] Failed: {err}")
+                return
+
+            existing_keys = tracker.load_all_message_keys()
+            saved_message_ids.update(existing_keys)
+
             print("=" * 65)
             print(f"Logged in as: {me.username or me.first_name} (User ID: {your_user_id})")
-            print(f"Scanning and saving ALL media from '{target}' to Saved Messages...")
-            print("=" * 65)
+            print(f"Command handler prefix: '{handler}'")
+            print(f"Automatic timed-media saving: {'enabled' if auto_save_timed else 'disabled'}")
+            print(f"Duplicate tracker: SQLite active ({len(existing_keys)} cached records)")
+            print(f"Rate limiter delay: {rate_limiter.delay}s per action (FloodWait threshold: {flood_sleep_threshold_env}s)")
 
-            async def cli_progress(processed, saved, done):
-                if not done:
-                    print(f"\r[Save-All] Scanned {processed} messages | Saved {saved} media files...", end="", flush=True)
-                else:
-                    print(f"\n[Save-All] Done! Successfully saved {saved} media files to Saved Messages.")
-
-            try:
-                await batch_save_chat_messages(
-                    client,
-                    target_entity,
-                    limit=None,
-                    media_only=True,
-                    progress_callback=cli_progress,
+            targets = parse_group_targets(configured_groups_raw)
+            if targets:
+                print(f"\nGroup Auto-Forwarding ({len(targets)} configured target(s)):")
+                print(f"  • Forward mode: {forward_mode}")
+                print(
+                    f"  • Filter: {'Media only' if forward_media_only else 'All messages (media + text tutorials)'}"
                 )
-            except Exception as err:
-                print(f"\n[Save-All] Failed: {err}")
-            return
+                print(f"  • Original uncompressed document: {force_document}")
+                print(f"  • Cleanup local downloads: {cleanup_downloads}")
+                await resolve_monitored_groups(client, targets)
 
-        existing_keys = tracker.load_all_message_keys()
-        saved_message_ids.update(existing_keys)
+                if backfill_limit == "all" or (isinstance(backfill_limit, int) and backfill_limit > 0):
+                    await perform_backfill(client, list(resolved_group_ids), backfill_limit)
+            else:
+                print("\nGroup auto-forwarding: disabled (no FORWARD_GROUP_IDS configured)")
+                print("Tip: set FORWARD_GROUP_IDS in .env or run with --forward-groups")
 
-        print("=" * 65)
-        print(f"Logged in as: {me.username or me.first_name} (User ID: {your_user_id})")
-        print(f"Command handler prefix: '{handler}'")
-        print(f"Automatic timed-media saving: {'enabled' if auto_save_timed else 'disabled'}")
-        print(f"Duplicate tracker: SQLite active ({len(existing_keys)} cached records)")
-        print(f"Rate limiter delay: {rate_limiter.delay}s per action (FloodWait threshold: {flood_sleep_threshold_env}s)")
-
-        targets = parse_group_targets(configured_groups_raw)
-        if targets:
-            print(f"\nGroup Auto-Forwarding ({len(targets)} configured target(s)):")
-            print(f"  • Forward mode: {forward_mode}")
-            print(
-                f"  • Filter: {'Media only' if forward_media_only else 'All messages (media + text tutorials)'}"
-            )
-            print(f"  • Original uncompressed document: {force_document}")
-            print(f"  • Cleanup local downloads: {cleanup_downloads}")
-            await resolve_monitored_groups(client, targets)
-
-            if backfill_limit == "all" or (isinstance(backfill_limit, int) and backfill_limit > 0):
-                await perform_backfill(client, list(resolved_group_ids), backfill_limit)
-        else:
-            print("\nGroup auto-forwarding: disabled (no FORWARD_GROUP_IDS configured)")
-            print("Tip: set FORWARD_GROUP_IDS in .env or run with --forward-groups")
-
-        print("=" * 65)
-        print("Saveit is active and listening for messages. Press Ctrl+C to stop.")
-        await client.run_until_disconnected()
+            print("=" * 65)
+            print("Saveit is active and listening for messages. Press Ctrl+C to stop.")
+            await run_client_with_reconnect()
+    finally:
+        if cleanup_downloads:
+            cleanup_empty_downloads_dir()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Saveit] Stopped by user (Ctrl+C). Goodbye!")
+        if cleanup_downloads:
+            cleanup_empty_downloads_dir()
 
