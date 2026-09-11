@@ -13,8 +13,8 @@ Saveit is an automated Telegram userbot built with [Telethon](https://docs.telet
 * **Chat Discovery CLI**: Quickly list all joined channels and groups along with their numeric Chat IDs and usernames via `python3 Saveit.py --list-chats`.
 * **Original Quality Preservation**: Uploads media files using Telegram's document mode (`FORCE_DOCUMENT=true`) to avoid video/image re-compression.
 * **Persistent SQLite Duplicate Tracker**: Tracks message IDs, Telegram file IDs (`document.id`/`photo.id`), and binary SHA-256 hashes in a local SQLite database (`saveit_tracker.db`). Survives restarts and skips duplicates even if files are renamed or reposted.
-* **In-Chat Userbot Commands**: Control saving, query chat IDs, view storage stats (`.stats`), and batch save messages directly from Telegram chats using your account.
-* **FloodWait Protection**: Automatically catches and handles Telegram rate limits (`FloodWaitError`), pausing cleanly without crashing.
+* **In-Chat Userbot Commands**: Control saving, query chat IDs, view storage stats (`.stats`), adjust rate limits (`.rate`), and batch save messages directly from Telegram chats using your account.
+* **Adaptive Rate Limiting & FloodWait Protection**: Throttles outgoing forward and upload operations (`RATE_LIMIT_DELAY=1.5s`) to comply with Telegram limits. Automatically pauses and retries on `FloodWaitError` without dropping messages.
 
 ---
 
@@ -111,6 +111,8 @@ All settings can be configured in `.env`. Here is the full list of supported par
 | `FORCE_DOCUMENT` | Boolean | `true` | Sends files as uncompressed documents to maintain 100% original quality. |
 | `CLEANUP_DOWNLOADS` | Boolean | `false` | Automatically deletes downloaded files from `downloads/` after sending them to Saved Messages. |
 | `TRACKER_DB` | String | `saveit_tracker.db` | Local SQLite database file for tracking messages, Telegram file IDs, and SHA-256 hashes to prevent duplicates. |
+| `RATE_LIMIT_DELAY` | Float | `1.5` | Minimum seconds between outgoing Telegram actions (forwards, uploads, messages) to prevent flood limits. |
+| `FLOOD_SLEEP_THRESHOLD` | Integer | `60` | Maximum seconds Telethon will automatically pause and retry when encountering Telegram `FloodWaitError`. |
 
 ---
 
@@ -136,6 +138,9 @@ python3 Saveit.py --backfill 50
 
 # Forward only messages containing media (videos, PDFs, code files, diagrams)
 python3 Saveit.py --media-only
+
+# Customize the rate limit delay between actions (e.g. 2.0 seconds)
+python3 Saveit.py --rate-limit 2.0
 
 # Automatically delete local downloaded files after re-uploading
 python3 Saveit.py --cleanup
@@ -197,6 +202,7 @@ All commands are only responsive to **you** (the userbot owner). Other chat memb
 | `.saveit` | Reply to any media with `.saveit` | Downloads the replied media and saves it to your Saved Messages as an uncompressed original file. Preserves original captions. |
 | `.id` / `.chatid` | `.id` | Displays the current chat's Title, ID, Username, and Type. |
 | `.stats` | `.stats` | Displays SQLite duplicate tracker statistics (total archived messages, total media size, and unique SHA-256 hashes). |
+| `.rate [seconds]` | `.rate`<br>`.rate 2.0` | Displays current rate limit delay or dynamically adjusts it in real-time without restarting the bot. |
 | `.savehere [limit\|all]` | `.savehere all`<br>`.savehere 50` | Batch-saves messages from the current chat to your Saved Messages. Specify `all` to download all historical media from the group. |
 | `.saveall` | `.saveall` | Shortcut for `.savehere all`. Scans and saves **ALL media** from the current group chronologically with live progress updates. |
 | `.savegroup <target> [limit\|all]` | `.savegroup @py_tutorials all`<br>`.savegroup -1001234567 100` | Batch-saves messages or **all media** from the specified target group ID or username to your Saved Messages. |
@@ -239,8 +245,11 @@ flowchart TD
 
 ## Troubleshooting & FAQ
 
-### 1. `FloodWaitError`
-Telegram enforces rate limits on message operations. If you attempt to backfill hundreds of messages at once, Telegram may require a wait period. Saveit automatically catches `FloodWaitError`, logs the wait time, and resumes safely.
+### 1. `FloodWaitError` & Rate Limiting
+Telegram strictly regulates the frequency of message forwarding and file uploading:
+* **Proactive Pacing**: Saveit spaces outgoing operations by default (`RATE_LIMIT_DELAY=1.5s`, configurable via CLI `--rate-limit` or `.env`).
+* **Dynamic In-Chat Control**: Send `.rate 2.0` in Telegram to adjust pacing on the fly during heavy archiving runs.
+* **Automatic Pause & Retry**: If Telegram returns a `FloodWaitError`, Saveit catches it, logs the exact required pause time, waits safely, and automatically retries the action up to 3 times without losing messages.
 
 ### 2. Does Saveit compress video tutorials?
 No. Saveit defaults to `FORCE_DOCUMENT=true`, ensuring tutorial videos, PDFs, and code archives are saved in their 100% original binary state without Telegram re-encoding.

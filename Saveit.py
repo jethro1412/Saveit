@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import random
 import re
 import sys
 from pathlib import Path
@@ -64,6 +65,18 @@ try:
 except ValueError:
     backfill_limit_env = 0
 
+try:
+    rate_limit_delay_env = float(
+        os.getenv("RATE_LIMIT_DELAY", os.getenv("RATE_LIMIT", "1.5"))
+    )
+except ValueError:
+    rate_limit_delay_env = 1.5
+
+try:
+    flood_sleep_threshold_env = int(os.getenv("FLOOD_SLEEP_THRESHOLD", "60"))
+except ValueError:
+    flood_sleep_threshold_env = 60
+
 tracker_db_env = os.getenv("TRACKER_DB", "saveit_tracker.db")
 
 
@@ -120,6 +133,13 @@ def parse_args():
         action="store_true",
         help="Display SQLite duplicate tracker statistics and storage totals, then exit",
     )
+    parser.add_argument(
+        "-r",
+        "--rate-limit",
+        type=float,
+        default=None,
+        help="Rate limit delay in seconds between Telegram actions (default: 1.5)",
+    )
     # Use parse_known_args to avoid crashing if unrecognized flags are passed
     parsed, _ = parser.parse_known_args()
     return parsed
@@ -140,6 +160,9 @@ cleanup_downloads = (
     args.cleanup if args.cleanup is not None else cleanup_downloads_env
 )
 force_document = force_document_env
+rate_limit_delay = (
+    args.rate_limit if args.rate_limit is not None else rate_limit_delay_env
+)
 
 tracker = FileTracker(tracker_db_env)
 
@@ -154,8 +177,70 @@ if args.stats:
     print(f"  • Total Saved Records: {st['total_records']}")
     print(f"  • Total Archived Size: {size_str}")
     print(f"  • Unique File Hashes:  {st['unique_hashes']}")
+    print(f"  • Rate Limit Delay:    {rate_limit_delay}s per action")
     print("=" * 60)
     sys.exit(0)
+
+
+class RateLimiter:
+    """
+    Enforces human-like randomized intervals between outgoing Telegram operations
+    (forwarding, file uploads, text sends) to stay compliant with rate limits
+    and protect user accounts from automated spam heuristics and bans.
+    """
+
+    def __init__(self, delay: float = 1.5, jitter: bool = True):
+        self.delay = max(0.0, float(delay))
+        self.jitter = jitter
+        self._lock = asyncio.Lock()
+        self._last_call = 0.0
+
+    async def wait(self):
+        """Pauses with randomized human-like jitter to guarantee safe intervals between calls."""
+        if self.delay <= 0:
+            return
+        async with self._lock:
+            # Add random jitter (0.2s - 0.8s) to avoid repetitive mechanical bot fingerprints
+            extra_jitter = random.uniform(0.2, 0.8) if self.jitter else 0.0
+            effective_delay = self.delay + extra_jitter
+
+            now = asyncio.get_event_loop().time()
+            elapsed = now - self._last_call
+            if elapsed < effective_delay:
+                await asyncio.sleep(effective_delay - elapsed)
+            self._last_call = asyncio.get_event_loop().time()
+
+    def backoff_on_flood(self, penalty: float = 0.5):
+        """Automatically slows down future requests if a FloodWait is encountered."""
+        self.delay = round(self.delay + penalty, 2)
+
+
+rate_limiter = RateLimiter(rate_limit_delay)
+
+
+async def call_with_rate_limit(coro_fn, *args, **kwargs):
+    """
+    Calls an asynchronous Telegram operation respecting the rate limiter,
+    with automatic FloodWaitError safety backoff and retry handling.
+    """
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        await rate_limiter.wait()
+        try:
+            return await coro_fn(*args, **kwargs)
+        except FloodWaitError as fwe:
+            # Add randomized safety cushion beyond Telegram's requested wait
+            safety_buffer = random.uniform(2.0, 5.0)
+            wait_time = int(fwe.seconds + safety_buffer)
+            rate_limiter.backoff_on_flood(0.5)
+            print(
+                f"[Anti-Ban] Telegram FloodWait ({fwe.seconds}s). "
+                f"Sleeping safely for {wait_time}s with buffer (delay increased to {rate_limiter.delay}s, retry {attempt}/{max_retries})..."
+            )
+            await asyncio.sleep(wait_time)
+            if attempt == max_retries:
+                raise
+
 
 if TelegramClient is None:
     print("Error: Required package 'telethon' is not installed.")
@@ -167,7 +252,12 @@ if not api_id or not api_hash:
     print("Please check .env.example or run run.sh / run.bat to configure credentials.")
     sys.exit(1)
 
-client = TelegramClient("save", int(api_id), api_hash)
+client = TelegramClient(
+    "save",
+    int(api_id),
+    api_hash,
+    flood_sleep_threshold=flood_sleep_threshold_env,
+)
 downloads_path = Path("downloads")
 saved_message_ids = set()
 save_lock = asyncio.Lock()
@@ -268,7 +358,7 @@ async def forward_or_save_message(
         # 1. Attempt native forwarding if mode is 'forward'
         if mode == "forward":
             try:
-                await client.forward_messages("me", message)
+                await call_with_rate_limit(client.forward_messages, "me", message)
                 tracker.record_saved(
                     chat_id=message.chat_id,
                     message_id=message.id,
@@ -287,7 +377,9 @@ async def forward_or_save_message(
         # 2. Copy/Download mode (or fallback after restricted forward)
         if message.media:
             downloads_path.mkdir(parents=True, exist_ok=True)
-            file_path = await client.download_media(message, file=str(downloads_path))
+            file_path = await call_with_rate_limit(
+                client.download_media, message, file=str(downloads_path)
+            )
             if not file_path:
                 raise RuntimeError("Telegram did not return a downloadable file")
 
@@ -317,7 +409,8 @@ async def forward_or_save_message(
                 full_text = caption
                 caption = caption[:1020] + "..."
 
-            await client.send_file(
+            await call_with_rate_limit(
+                client.send_file,
                 "me",
                 file_path,
                 caption=caption if caption else None,
@@ -325,7 +418,7 @@ async def forward_or_save_message(
             )
 
             if full_text:
-                await client.send_message("me", full_text)
+                await call_with_rate_limit(client.send_message, "me", full_text)
 
             tracker.record_saved(
                 chat_id=message.chat_id,
@@ -351,7 +444,7 @@ async def forward_or_save_message(
             # Text tutorial/code snippet without media
             chat_title = source_label or str(message.chat_id)
             header = f"📚 **[{chat_title}]**\n\n"
-            await client.send_message("me", header + message.text)
+            await call_with_rate_limit(client.send_message, "me", header + message.text)
             tracker.record_saved(
                 chat_id=message.chat_id,
                 message_id=message.id,
@@ -399,7 +492,9 @@ async def save_media(message, sender_id):
     downloads_path.mkdir(parents=True, exist_ok=True)
 
     try:
-        file_path = await client.download_media(message, file=str(downloads_path))
+        file_path = await call_with_rate_limit(
+            client.download_media, message, file=str(downloads_path)
+        )
         if not file_path:
             raise RuntimeError("Telegram did not return a downloadable file")
 
@@ -423,7 +518,8 @@ async def save_media(message, sender_id):
             return
 
         caption_text = message.text or f"File saved from {sender_id}"
-        await client.send_file(
+        await call_with_rate_limit(
+            client.send_file,
             "me",
             file_path,
             caption=caption_text,
@@ -543,6 +639,12 @@ async def batch_save_chat_messages(
                 )
                 if saved:
                     total_saved += 1
+                    if total_saved % 25 == 0:
+                        breather = round(random.uniform(3.0, 6.0), 1)
+                        print(f"  [Anti-Ban] Completed 25 items; pausing {breather}s cooling breather...")
+                        await asyncio.sleep(breather)
+                else:
+                    await asyncio.sleep(0.005)
             except Exception as e:
                 print(f"  Error saving message {msg.id}: {e}")
 
@@ -566,6 +668,12 @@ async def batch_save_chat_messages(
                 )
                 if saved:
                     total_saved += 1
+                    if total_saved % 25 == 0:
+                        breather = round(random.uniform(3.0, 6.0), 1)
+                        print(f"  [Anti-Ban] Completed 25 items; pausing {breather}s cooling breather...")
+                        await asyncio.sleep(breather)
+                else:
+                    await asyncio.sleep(0.005)
             except Exception as e:
                 print(f"  Error saving message {msg.id}: {e}")
 
@@ -582,11 +690,11 @@ async def batch_save_chat_messages(
 
 @client.on(
     events.NewMessage(
-        pattern=rf"^(?:{re.escape(handler)}|\.id|\.chatid|\.stats|\.savehere|\.saveall|\.savegroup)(?:\s+(.*))?$"
+        pattern=rf"^(?:{re.escape(handler)}|\.id|\.chatid|\.stats|\.rate|\.savehere|\.saveall|\.savegroup)(?:\s+(.*))?$"
     )
 )
 async def handle_userbot_command(event):
-    """Handles manual commands (.saveit, .id, .stats, .savehere, .saveall, .savegroup) sent by the userbot owner."""
+    """Handles manual commands (.saveit, .id, .stats, .rate, .savehere, .saveall, .savegroup) sent by the userbot owner."""
     if event.sender_id != your_user_id:
         return
 
@@ -596,6 +704,30 @@ async def handle_userbot_command(event):
     args_str = raw_text[len(cmd):].strip()
     subparts = args_str.split()
     subcmd = subparts[0].lower() if subparts else ""
+
+    # Command: .rate [seconds] / <handler> rate [seconds]
+    if cmd in {".rate"} or (cmd == handler.lower() and subcmd in {"rate", "delay"}):
+        new_rate = (
+            subparts[1]
+            if (cmd == handler.lower() and len(subparts) > 1)
+            else (subparts[0] if (cmd == ".rate" and len(subparts) > 0) else "")
+        )
+        if new_rate:
+            try:
+                rate_val = float(new_rate)
+                if rate_val < 0:
+                    raise ValueError
+                rate_limiter.delay = rate_val
+                await event.respond(f"⏱️ Rate limiter delay updated to `{rate_val}s` per action.")
+            except ValueError:
+                await event.respond("Usage: `.rate <seconds>` (e.g. `.rate 1.5` or `.rate 2.0`)")
+        else:
+            await event.respond(
+                f"⏱️ **Rate Limiter Settings**\n"
+                f"• **Current Delay**: `{rate_limiter.delay}s` per action\n"
+                f"• Change with: `.rate <seconds>` (e.g. `.rate 2.0`)"
+            )
+        return
 
     # Command: .stats / <handler> stats
     if cmd in {".stats"} or (cmd == handler.lower() and subcmd in {"stats", "stat"}):
@@ -608,6 +740,7 @@ async def handle_userbot_command(event):
             f"• **Archived Messages**: `{st['total_records']}`\n"
             f"• **Archived Media Size**: `{size_str}`\n"
             f"• **Unique File Hashes**: `{st['unique_hashes']}`\n"
+            f"• **Rate Limit Delay**: `{rate_limiter.delay}s`\n"
             f"• **Database Engine**: `SQLite (WAL Mode)`"
         )
         await event.respond(info_text)
@@ -837,6 +970,7 @@ async def main():
         print(f"Command handler prefix: '{handler}'")
         print(f"Automatic timed-media saving: {'enabled' if auto_save_timed else 'disabled'}")
         print(f"Duplicate tracker: SQLite active ({len(existing_keys)} cached records)")
+        print(f"Rate limiter delay: {rate_limiter.delay}s per action (FloodWait threshold: {flood_sleep_threshold_env}s)")
 
         targets = parse_group_targets(configured_groups_raw)
         if targets:
