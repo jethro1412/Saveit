@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 
+from tracker import FileTracker, extract_telegram_file_id
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -62,6 +64,8 @@ try:
 except ValueError:
     backfill_limit_env = 0
 
+tracker_db_env = os.getenv("TRACKER_DB", "saveit_tracker.db")
+
 
 def parse_args():
     """Parses optional command-line arguments."""
@@ -111,6 +115,11 @@ def parse_args():
         metavar="TARGET",
         help="Save ALL media from a specific group/channel ID or username to Saved Messages, then exit",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Display SQLite duplicate tracker statistics and storage totals, then exit",
+    )
     # Use parse_known_args to avoid crashing if unrecognized flags are passed
     parsed, _ = parser.parse_known_args()
     return parsed
@@ -131,6 +140,22 @@ cleanup_downloads = (
     args.cleanup if args.cleanup is not None else cleanup_downloads_env
 )
 force_document = force_document_env
+
+tracker = FileTracker(tracker_db_env)
+
+if args.stats:
+    st = tracker.get_stats()
+    mb = st["total_bytes"] / (1024 * 1024)
+    gb = mb / 1024
+    size_str = f"{gb:.2f} GB" if gb >= 1.0 else f"{mb:.2f} MB"
+    print("=" * 60)
+    print("Saveit SQLite Duplicate Tracker Statistics:")
+    print(f"  • Database Path:       {st['db_path']}")
+    print(f"  • Total Saved Records: {st['total_records']}")
+    print(f"  • Total Archived Size: {size_str}")
+    print(f"  • Unique File Hashes:  {st['unique_hashes']}")
+    print("=" * 60)
+    sys.exit(0)
 
 if TelegramClient is None:
     print("Error: Required package 'telethon' is not installed.")
@@ -217,19 +242,39 @@ async def forward_or_save_message(
     Attempts direct Telegram forwarding first (if mode == 'forward').
     If forwarding is restricted by channel/group ('noforwards' protection),
     automatically falls back to downloading media and sending as original file or copying text.
+    Tracks all saved messages, Telegram File IDs, and SHA-256 hashes in SQLite.
     """
     message_key = (message.chat_id, message.id)
 
     async with save_lock:
-        if message_key in saved_message_ids:
+        if message_key in saved_message_ids or tracker.is_message_saved(message.chat_id, message.id):
+            saved_message_ids.add(message_key)
             return False
         saved_message_ids.add(message_key)
+
+    # Check Telegram internal file ID (zero-download duplicate check)
+    telegram_file_id = extract_telegram_file_id(message)
+    if telegram_file_id and tracker.is_file_id_saved(telegram_file_id):
+        print(f"[Duplicate Skipped] Telegram File ID {telegram_file_id} already archived; skipping.")
+        tracker.record_saved(
+            chat_id=message.chat_id,
+            message_id=message.id,
+            telegram_file_id=telegram_file_id,
+            caption=message.text,
+        )
+        return False
 
     try:
         # 1. Attempt native forwarding if mode is 'forward'
         if mode == "forward":
             try:
                 await client.forward_messages("me", message)
+                tracker.record_saved(
+                    chat_id=message.chat_id,
+                    message_id=message.id,
+                    telegram_file_id=telegram_file_id,
+                    caption=message.text,
+                )
                 print(f"[Forwarded] Message {message.id} from chat {message.chat_id} to Saved Messages.")
                 return True
             except ChatForwardsRestrictedError:
@@ -245,6 +290,25 @@ async def forward_or_save_message(
             file_path = await client.download_media(message, file=str(downloads_path))
             if not file_path:
                 raise RuntimeError("Telegram did not return a downloadable file")
+
+            path_obj = Path(file_path)
+            file_size = path_obj.stat().st_size
+            file_name = path_obj.name
+            file_hash = tracker.compute_sha256(file_path)
+
+            if tracker.is_file_hash_saved(file_hash):
+                print(f"[Duplicate Skipped] Content SHA-256 ({file_hash[:10]}...) already saved; skipping re-upload.")
+                path_obj.unlink(missing_ok=True)
+                tracker.record_saved(
+                    chat_id=message.chat_id,
+                    message_id=message.id,
+                    telegram_file_id=telegram_file_id,
+                    file_name=file_name,
+                    file_size=file_size,
+                    file_hash=file_hash,
+                    caption=message.text,
+                )
+                return False
 
             caption = message.text or (f"File saved from {source_label}" if source_label else "")
             full_text = None
@@ -263,11 +327,21 @@ async def forward_or_save_message(
             if full_text:
                 await client.send_message("me", full_text)
 
+            tracker.record_saved(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                telegram_file_id=telegram_file_id,
+                file_name=file_name,
+                file_size=file_size,
+                file_hash=file_hash,
+                caption=caption,
+            )
+
             print(f"[Saved Media] Message {message.id} from chat {message.chat_id}: {file_path}")
 
             if cleanup:
                 try:
-                    Path(file_path).unlink(missing_ok=True)
+                    path_obj.unlink(missing_ok=True)
                 except Exception as del_err:
                     print(f"Warning: Could not remove temporary file {file_path}: {del_err}")
 
@@ -278,6 +352,12 @@ async def forward_or_save_message(
             chat_title = source_label or str(message.chat_id)
             header = f"📚 **[{chat_title}]**\n\n"
             await client.send_message("me", header + message.text)
+            tracker.record_saved(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                file_size=len(message.text),
+                caption=message.text,
+            )
             print(f"[Saved Text] Message {message.id} from chat {message.chat_id} to Saved Messages.")
             return True
 
@@ -297,13 +377,24 @@ async def forward_or_save_message(
 
 async def save_media(message, sender_id):
     """Saves media locally and sends to Saved Messages (preserves original behavior)."""
-    caption_text = message.text or f"File saved from {sender_id}"
     message_key = (message.chat_id, message.id)
 
     async with save_lock:
-        if message_key in saved_message_ids:
+        if message_key in saved_message_ids or tracker.is_message_saved(message.chat_id, message.id):
+            saved_message_ids.add(message_key)
             return
         saved_message_ids.add(message_key)
+
+    telegram_file_id = extract_telegram_file_id(message)
+    if telegram_file_id and tracker.is_file_id_saved(telegram_file_id):
+        print(f"[Duplicate Skipped] Telegram File ID {telegram_file_id} already saved.")
+        tracker.record_saved(
+            chat_id=message.chat_id,
+            message_id=message.id,
+            telegram_file_id=telegram_file_id,
+            caption=message.text,
+        )
+        return
 
     downloads_path.mkdir(parents=True, exist_ok=True)
 
@@ -312,16 +403,45 @@ async def save_media(message, sender_id):
         if not file_path:
             raise RuntimeError("Telegram did not return a downloadable file")
 
+        path_obj = Path(file_path)
+        file_size = path_obj.stat().st_size
+        file_name = path_obj.name
+        file_hash = tracker.compute_sha256(file_path)
+
+        if tracker.is_file_hash_saved(file_hash):
+            print(f"[Duplicate Skipped] Content SHA-256 ({file_hash[:10]}...) already saved; skipping upload.")
+            path_obj.unlink(missing_ok=True)
+            tracker.record_saved(
+                chat_id=message.chat_id,
+                message_id=message.id,
+                telegram_file_id=telegram_file_id,
+                file_name=file_name,
+                file_size=file_size,
+                file_hash=file_hash,
+                caption=message.text,
+            )
+            return
+
+        caption_text = message.text or f"File saved from {sender_id}"
         await client.send_file(
             "me",
             file_path,
             caption=caption_text,
             force_document=force_document,
         )
+        tracker.record_saved(
+            chat_id=message.chat_id,
+            message_id=message.id,
+            telegram_file_id=telegram_file_id,
+            file_name=file_name,
+            file_size=file_size,
+            file_hash=file_hash,
+            caption=caption_text,
+        )
         print(f"Saved media from {sender_id}: {file_path}")
         if cleanup_downloads:
             try:
-                Path(file_path).unlink(missing_ok=True)
+                path_obj.unlink(missing_ok=True)
             except Exception:
                 pass
     except Exception:
@@ -462,11 +582,11 @@ async def batch_save_chat_messages(
 
 @client.on(
     events.NewMessage(
-        pattern=rf"^(?:{re.escape(handler)}|\.id|\.chatid|\.savehere|\.saveall|\.savegroup)(?:\s+(.*))?$"
+        pattern=rf"^(?:{re.escape(handler)}|\.id|\.chatid|\.stats|\.savehere|\.saveall|\.savegroup)(?:\s+(.*))?$"
     )
 )
 async def handle_userbot_command(event):
-    """Handles manual commands (.saveit, .id, .savehere, .saveall, .savegroup) sent by the userbot owner."""
+    """Handles manual commands (.saveit, .id, .stats, .savehere, .saveall, .savegroup) sent by the userbot owner."""
     if event.sender_id != your_user_id:
         return
 
@@ -476,6 +596,22 @@ async def handle_userbot_command(event):
     args_str = raw_text[len(cmd):].strip()
     subparts = args_str.split()
     subcmd = subparts[0].lower() if subparts else ""
+
+    # Command: .stats / <handler> stats
+    if cmd in {".stats"} or (cmd == handler.lower() and subcmd in {"stats", "stat"}):
+        st = tracker.get_stats()
+        mb = st["total_bytes"] / (1024 * 1024)
+        gb = mb / 1024
+        size_str = f"{gb:.2f} GB" if gb >= 1.0 else f"{mb:.2f} MB"
+        info_text = (
+            f"📊 **Saveit Duplicate Tracker Statistics**\n"
+            f"• **Archived Messages**: `{st['total_records']}`\n"
+            f"• **Archived Media Size**: `{size_str}`\n"
+            f"• **Unique File Hashes**: `{st['unique_hashes']}`\n"
+            f"• **Database Engine**: `SQLite (WAL Mode)`"
+        )
+        await event.respond(info_text)
+        return
 
     # Command: .id / .chatid / <handler> id
     if cmd in {".id", ".chatid"} or (cmd == handler.lower() and subcmd in {"id", "info", "chat"}):
@@ -692,10 +828,15 @@ async def main():
             except Exception as err:
                 print(f"\n[Save-All] Failed: {err}")
             return
+
+        existing_keys = tracker.load_all_message_keys()
+        saved_message_ids.update(existing_keys)
+
         print("=" * 65)
         print(f"Logged in as: {me.username or me.first_name} (User ID: {your_user_id})")
         print(f"Command handler prefix: '{handler}'")
         print(f"Automatic timed-media saving: {'enabled' if auto_save_timed else 'disabled'}")
+        print(f"Duplicate tracker: SQLite active ({len(existing_keys)} cached records)")
 
         targets = parse_group_targets(configured_groups_raw)
         if targets:

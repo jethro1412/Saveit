@@ -12,7 +12,8 @@ Saveit is an automated Telegram userbot built with [Telethon](https://docs.telet
 * **Historical Backfill / Catch-Up**: Easily backfill past tutorial messages upon bot startup (`BACKFILL_LIMIT` / `--backfill`) or on-demand via in-chat commands.
 * **Chat Discovery CLI**: Quickly list all joined channels and groups along with their numeric Chat IDs and usernames via `python3 Saveit.py --list-chats`.
 * **Original Quality Preservation**: Uploads media files using Telegram's document mode (`FORCE_DOCUMENT=true`) to avoid video/image re-compression.
-* **In-Chat Userbot Commands**: Control saving, query chat IDs, and batch save messages directly from Telegram chats using your account.
+* **Persistent SQLite Duplicate Tracker**: Tracks message IDs, Telegram file IDs (`document.id`/`photo.id`), and binary SHA-256 hashes in a local SQLite database (`saveit_tracker.db`). Survives restarts and skips duplicates even if files are renamed or reposted.
+* **In-Chat Userbot Commands**: Control saving, query chat IDs, view storage stats (`.stats`), and batch save messages directly from Telegram chats using your account.
 * **FloodWait Protection**: Automatically catches and handles Telegram rate limits (`FloodWaitError`), pausing cleanly without crashing.
 
 ---
@@ -109,6 +110,7 @@ All settings can be configured in `.env`. Here is the full list of supported par
 | `BACKFILL_LIMIT` | Integer | `0` | Number of recent messages to fetch from monitored groups on startup (`0` = disabled). |
 | `FORCE_DOCUMENT` | Boolean | `true` | Sends files as uncompressed documents to maintain 100% original quality. |
 | `CLEANUP_DOWNLOADS` | Boolean | `false` | Automatically deletes downloaded files from `downloads/` after sending them to Saved Messages. |
+| `TRACKER_DB` | String | `saveit_tracker.db` | Local SQLite database file for tracking messages, Telegram file IDs, and SHA-256 hashes to prevent duplicates. |
 
 ---
 
@@ -122,6 +124,9 @@ python3 Saveit.py --help
 
 # Discover joined groups, channels, and their numeric chat IDs
 python3 Saveit.py --list-chats
+
+# View SQLite duplicate tracker statistics (total saved, archived bytes, unique hashes)
+python3 Saveit.py --stats
 
 # Run and monitor specific groups via CLI argument
 python3 Saveit.py --forward-groups "-1001234567890,@learngolang"
@@ -191,6 +196,7 @@ All commands are only responsive to **you** (the userbot owner). Other chat memb
 | :--- | :--- | :--- |
 | `.saveit` | Reply to any media with `.saveit` | Downloads the replied media and saves it to your Saved Messages as an uncompressed original file. Preserves original captions. |
 | `.id` / `.chatid` | `.id` | Displays the current chat's Title, ID, Username, and Type. |
+| `.stats` | `.stats` | Displays SQLite duplicate tracker statistics (total archived messages, total media size, and unique SHA-256 hashes). |
 | `.savehere [limit\|all]` | `.savehere all`<br>`.savehere 50` | Batch-saves messages from the current chat to your Saved Messages. Specify `all` to download all historical media from the group. |
 | `.saveall` | `.saveall` | Shortcut for `.savehere all`. Scans and saves **ALL media** from the current group chronologically with live progress updates. |
 | `.savegroup <target> [limit\|all]` | `.savegroup @py_tutorials all`<br>`.savegroup -1001234567 100` | Batch-saves messages or **all media** from the specified target group ID or username to your Saved Messages. |

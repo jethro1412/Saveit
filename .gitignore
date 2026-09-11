@@ -21,3 +21,11 @@ env/
 # Graphify build outputs
 graphify-out/
 
+# SQLite duplicate tracker databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
