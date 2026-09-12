@@ -292,6 +292,7 @@ your_user_id = None
 # Resolved monitored entities for group auto-forwarding
 resolved_group_ids = set()
 monitored_chat_names = {}
+resolved_entities = {}
 
 
 def parse_group_targets(raw_string):
@@ -315,26 +316,93 @@ def parse_group_targets(raw_string):
 
 
 async def resolve_monitored_groups(client_instance, targets):
-    """Resolves user-specified group targets to canonical peer IDs and titles."""
+    """
+    Resolves user-specified group targets to canonical peer IDs and titles.
+    Automatically fetches dialogs if an entity is not yet in the local session cache,
+    and auto-detects basic groups vs supergroups.
+    """
+    dialogs_cache = None
+
     for target in targets:
+        entity = None
+        # 1. Attempt direct resolution first
         try:
             entity = await client_instance.get_entity(target)
+        except Exception:
+            pass
+
+        # 2. If direct resolution failed, fetch account dialogs to populate cache & search
+        if entity is None:
+            if dialogs_cache is None:
+                try:
+                    dialogs_cache = await client_instance.get_dialogs()
+                except Exception as d_err:
+                    print(f"  • Notice: Could not fetch dialogs: {d_err}")
+                    dialogs_cache = []
+
+            for d in dialogs_cache:
+                d_peer_id = utils.get_peer_id(d.entity)
+                d_raw_id = getattr(d.entity, "id", None)
+                d_username = getattr(d.entity, "username", None)
+
+                # Match by username (e.g. @python_tutorials or python_tutorials)
+                if isinstance(target, str) and d_username and target.lstrip("@").lower() == d_username.lower():
+                    entity = d.entity
+                    break
+
+                # Match by exact peer_id or raw ID
+                if target in (d_peer_id, d_raw_id):
+                    entity = d.entity
+                    break
+
+                # Match variations of -100 prefix (supergroup vs basic group)
+                if isinstance(target, int):
+                    target_str = str(target)
+                    # Case A: User wrote -100XXXXXXXXXX, but it's a basic group (-XXXXXXXXXX)
+                    if target_str.startswith("-100"):
+                        without_100 = int(f"-{target_str[4:]}")
+                        if d_peer_id == without_100 or d_raw_id == without_100:
+                            print(f"  • Auto-corrected ID: {target} is a basic group with actual ID {d_peer_id}")
+                            entity = d.entity
+                            break
+                    # Case B: User wrote -XXXXXXXXXX, but it was upgraded to a supergroup (-100XXXXXXXXXX)
+                    elif target_str.startswith("-"):
+                        with_100 = int(f"-100{target_str[1:]}")
+                        if d_peer_id == with_100 or d_raw_id == with_100:
+                            print(f"  • Auto-corrected ID: {target} was upgraded to supergroup with actual ID {d_peer_id}")
+                            entity = d.entity
+                            break
+                    # Case C: User passed positive ID XXXXXXXXXX without minus
+                    else:
+                        cand_1 = int(f"-100{target}")
+                        cand_2 = int(f"-{target}")
+                        if d_peer_id in (cand_1, cand_2) or d_raw_id == target:
+                            print(f"  • Auto-corrected ID: {target} matched joined group with actual ID {d_peer_id}")
+                            entity = d.entity
+                            break
+
+        if entity is not None:
             peer_id = utils.get_peer_id(entity)
             resolved_group_ids.add(peer_id)
             if hasattr(entity, "id"):
                 resolved_group_ids.add(entity.id)
             title = getattr(entity, "title", getattr(entity, "username", str(peer_id)))
             monitored_chat_names[peer_id] = title
+            resolved_entities[peer_id] = entity
             print(f"  • Monitored: {title} (ID: {peer_id})")
-        except Exception as err:
+        else:
             if isinstance(target, int):
                 resolved_group_ids.add(target)
                 if target > 0:
                     resolved_group_ids.add(int(f"-100{target}"))
                 monitored_chat_names[target] = f"Group {target}"
-                print(f"  • Monitored (raw numeric ID): {target} (Resolution warning: {err})")
+                print(f"  • Warning: Target {target} is invalid or not accessible.")
+                print(f"    Possible reasons:")
+                print(f"    1. This Telegram account is NOT a member of group {target}.")
+                print(f"    2. The group ID was copied incorrectly.")
+                print(f"    Tip: Run 'python3 Saveit.py --list-chats' on this machine to list all joined groups and their IDs.")
             else:
-                print(f"  • Warning: Could not resolve target '{target}': {err}")
+                print(f"  • Warning: Could not resolve target '{target}'. Ensure this account has joined it.")
 
 
 def is_timed_media(message):
@@ -1032,7 +1100,9 @@ async def perform_backfill(client_instance, target_ids, limit):
 
     for chat_id in target_ids:
         try:
-            entity = await client_instance.get_entity(chat_id)
+            entity = resolved_entities.get(chat_id)
+            if not entity:
+                entity = await client_instance.get_entity(chat_id)
             title = getattr(entity, "title", str(chat_id))
             print(f"[Backfill] Scanning {label} from '{title}' ({chat_id})...")
 
@@ -1147,7 +1217,8 @@ async def main():
                 await resolve_monitored_groups(client, targets)
 
                 if backfill_limit == "all" or (isinstance(backfill_limit, int) and backfill_limit > 0):
-                    await perform_backfill(client, list(resolved_group_ids), backfill_limit)
+                    backfill_targets = list(resolved_entities.keys()) if resolved_entities else list(resolved_group_ids)
+                    await perform_backfill(client, backfill_targets, backfill_limit)
             else:
                 print("\nGroup auto-forwarding: disabled (no FORWARD_GROUP_IDS configured)")
                 print("Tip: set FORWARD_GROUP_IDS in .env or run with --forward-groups")
