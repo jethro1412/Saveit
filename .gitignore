@@ -29,3 +29,9 @@ graphify-out/
 *.sqlite
 *.sqlite3
 
+# PyInstaller build artifacts
+build/
+dist/
+*.spec.bak
+saveit_logs_*.txt
+

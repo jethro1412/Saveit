@@ -6,15 +6,18 @@ Saveit is an automated Telegram userbot built with [Telethon](https://docs.telet
 
 ## Key Features
 
+* **Modern Windows Desktop GUI**: Full-featured graphical desktop interface built with CustomTkinter (dark/light themes, live console log viewer, metrics dashboard, and account manager).
+* **Interactive Authentication Dialog**: Non-blocking in-app sign-in dialog for Phone Number, Telegram Login Code, and Two-Step (2FA) Password.
+* **Chat Explorer & Discovery**: Visually browse joined groups and channels, copy Chat IDs with one click, add to watchlists, or trigger on-demand batch media extraction.
 * **Automatic Timed Media Saver**: Intercepts and downloads disappearing/self-destructing photos, videos, voice notes, and video notes immediately upon arrival.
 * **Group & Channel Tutorial Forwarder**: Automatically listens to designated groups and channels (e.g., programming tutorial groups where owners allowed saving) and forwards/saves lessons directly to your Saved Messages (`"me"`).
 * **Restricted Content Fallback**: If a group has "Restrict saving content" (`noforwards`) enabled, Saveit automatically detects this and falls back to downloading the media and re-uploading it as an original file with tutorial captions intact.
-* **Historical Backfill / Catch-Up**: Easily backfill past tutorial messages upon bot startup (`BACKFILL_LIMIT` / `--backfill`) or on-demand via in-chat commands.
-* **Chat Discovery CLI**: Quickly list all joined channels and groups along with their numeric Chat IDs and usernames via `python3 Saveit.py --list-chats`.
+* **Historical Backfill / Catch-Up**: Easily backfill past tutorial messages upon bot startup (`BACKFILL_LIMIT` / `--backfill`) or on-demand via GUI and in-chat commands.
 * **Original Quality Preservation**: Uploads media files using Telegram's document mode (`FORCE_DOCUMENT=true`) to avoid video/image re-compression.
 * **Persistent SQLite Duplicate Tracker**: Tracks message IDs, Telegram file IDs (`document.id`/`photo.id`), and binary SHA-256 hashes in a local SQLite database (`saveit_tracker.db`). Survives restarts and skips duplicates even if files are renamed or reposted.
 * **In-Chat Userbot Commands**: Control saving, query chat IDs, view storage stats (`.stats`), adjust rate limits (`.rate`), and batch save messages directly from Telegram chats using your account.
 * **Adaptive Rate Limiting & FloodWait Protection**: Throttles outgoing forward and upload operations (`RATE_LIMIT_DELAY=1.5s`) to comply with Telegram limits. Automatically pauses and retries on `FloodWaitError` without dropping messages.
+* **One-Click Standalone Windows Executable (.exe)**: Pre-configured PyInstaller spec and build script to compile Saveit into a single standalone Windows executable (`dist/Saveit.exe`).
 
 ---
 
@@ -22,6 +25,9 @@ Saveit is an automated Telegram userbot built with [Telethon](https://docs.telet
 
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
+  - [Windows GUI App (Recommended)](#windows-gui-app-recommended)
+  - [Building Standalone Windows .exe](#building-standalone-windows-exe)
+  - [CLI Console Mode](#cli-console-mode)
 - [Telegram API Credentials](#telegram-api-credentials)
 - [Configuration Reference (.env)](#configuration-reference-env)
 - [Command Line Interface (CLI)](#command-line-interface-cli)
@@ -38,14 +44,17 @@ Saveit is an automated Telegram userbot built with [Telethon](https://docs.telet
 
 * **Python 3.9+**
 * Telegram Account & API Credentials (`API_ID` and `API_HASH`)
-* Python packages:
+* Python packages (installed automatically via `requirements.txt`):
+  * `customtkinter`
   * `telethon`
   * `python-dotenv`
+  * `Pillow`
+  * `pyinstaller` (optional, for building `.exe`)
 
 Install dependencies manually:
 
 ```bash
-pip install --upgrade telethon python-dotenv
+pip install -r requirements.txt
 ```
 
 ---
@@ -59,7 +68,36 @@ git clone https://github.com/DevURANIUM/Saveit.git
 cd Saveit
 ```
 
-### 2. Run the Interactive Setup Script
+### Windows GUI App (Recommended)
+
+To launch the modern Windows Desktop GUI:
+
+Double-click **`run_gui.bat`** or execute:
+
+```bat
+pythonw gui.py
+```
+
+* **First launch**: Enter your `API_ID` and `API_HASH` in the **Settings** tab.
+* Click **Start Userbot** on the Dashboard. If not logged in, a clean Telegram authentication dialog will prompt you for your Phone Number and Verification Code.
+* Use **Chat Explorer** to browse your groups, view numeric Chat IDs, and trigger one-click batch media saving or backfilling.
+
+### Building Standalone Windows .exe
+
+To compile Saveit into a standalone executable that runs without Python installed:
+
+Double-click **`build_exe.bat`** or run:
+
+```bat
+pyinstaller --clean -y Saveit.spec
+```
+
+The compiled standalone executable will be generated at:
+```text
+dist\Saveit.exe
+```
+
+### CLI Console Mode
 
 On **Linux / macOS**:
 
@@ -68,7 +106,7 @@ chmod +x run.sh
 ./run.sh
 ```
 
-On **Windows**:
+On **Windows (CLI Menu)**:
 
 ```bat
 run.bat
