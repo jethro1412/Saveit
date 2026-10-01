@@ -152,6 +152,26 @@ class FileTracker:
                 "db_path": str(self.db_path),
             }
 
+    def get_recent_records(self, limit: int = 50) -> list:
+        """Returns the most recently saved records for display in GUI or reporting."""
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT id, chat_id, message_id, file_name, file_size, file_hash, caption, saved_at
+                FROM saved_records
+                ORDER BY id DESC
+                LIMIT ?;
+                """,
+                (limit,),
+            )
+            columns = [col[0] for col in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def vacuum(self):
+        """Compacts the SQLite database to reclaim unused storage space."""
+        with self._lock:
+            self._conn.execute("VACUUM;")
+
     def close(self):
         """Closes the underlying SQLite database connection."""
         with self._lock:
