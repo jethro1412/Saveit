@@ -82,20 +82,69 @@ pythonw gui.py
 * Click **Start Userbot** on the Dashboard. If not logged in, a clean Telegram authentication dialog will prompt you for your Phone Number and Verification Code.
 * Use **Chat Explorer** to browse your groups, view numeric Chat IDs, and trigger one-click batch media saving or backfilling.
 
-### Building Standalone Windows .exe
+### Building Standalone Executables (GUI & CLI for Windows & Linux)
 
-To compile Saveit into a standalone executable that runs without Python installed:
+Saveit includes a unified cross-platform builder (`build.py`) with support for **custom branding** (white-labeling), custom icons, and compilation into standalone single-file executables for **Windows** and **Linux**:
 
-Double-click **`build_exe.bat`** or run:
+#### Quick Build (Default Branding):
 
+On **Windows**:
 ```bat
-pyinstaller --clean -y Saveit.spec
+build.bat
+```
+*(Compiles both `dist\Saveit.exe` (GUI) and `dist\Saveit-CLI.exe` (CLI).)*
+
+On **Linux / macOS**:
+```bash
+./build.sh
+```
+*(Compiles both `dist/Saveit` (GUI) and `dist/Saveit-CLI` (CLI).)*
+
+---
+
+### Custom Branding & White-Labeling
+
+You can easily customize the application name, titles, vendor, version, and icons without modifying code:
+
+#### Option 1: Command Line Flags
+```bash
+# Build custom GUI and CLI binaries:
+python3 build.py \
+  --mode both \
+  --name "MyMediaSaver" \
+  --title "MyMediaSaver — Enterprise Telegram Archiver" \
+  --version "3.0.0" \
+  --author "Acme Corp" \
+  --copyright "Copyright © 2026 Acme Corp" \
+  --icon "assets/icon.png"
 ```
 
-The compiled standalone executable will be generated at:
-```text
-dist\Saveit.exe
+#### Option 2: Using a JSON Branding Configuration
+Copy and customize `branding.example.json`:
+```bash
+python3 build.py --config branding.example.json
 ```
+
+#### Option 3: Interactive Configuration Wizard
+```bash
+python3 build.py --interactive
+```
+*(Or choose Option [3] in `run.bat` on Windows.)*
+
+#### Supported Build Options:
+| Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--mode {gui,cli,both}` | Target to build: windowed GUI, terminal CLI, or both | `both` |
+| `-n, --name` | Application & binary name (e.g. `MySaver` -> `MySaver.exe`) | `Saveit` |
+| `-t, --title` | Full display title for window headers and banners | `Saveit — Telegram Media Saver` |
+| `--subtitle` | Subtitle text in GUI sidebar | `Telegram Userbot` |
+| `-v, --version` | Semantic version string | `2.1.0` |
+| `-a, --author` | Author or company name | `DevURANIUM` |
+| `-d, --description` | Short application summary | Telegram Timed Media Saver |
+| `-i, --icon` | Path to icon (`.ico` on Windows, `.png` on Linux) | `assets/icon.*` |
+| `--onedir` | Build as unpacked directory instead of single standalone executable | Single executable (`--onefile`) |
+
+---
 
 ### CLI Console Mode
 

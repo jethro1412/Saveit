@@ -1,0 +1,11 @@
+{
+    "app_name": "Saveit",
+    "app_title": "Saveit — Telegram Media Saver & Group Tutorial Forwarder",
+    "app_subtitle": "Telegram Userbot",
+    "app_version": "2.1.0",
+    "app_author": "DevURANIUM",
+    "app_description": "Telegram Timed Media Saver & Group Tutorial Forwarder",
+    "app_copyright": "Copyright © 2026",
+    "icon": "assets/icon.png",
+    "mode": "both"
+}

@@ -10,6 +10,7 @@ from engine import (
     parse_group_targets,
 )
 from tracker import FileTracker
+import branding
 
 try:
     from dotenv import load_dotenv
@@ -26,7 +27,7 @@ except ImportError:
 def parse_args():
     """Parses optional command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="Saveit - Telegram Timed Media Saver & Group Tutorial Forwarder"
+        description=f"{branding.get_name()} - {branding.get_description()}"
     )
     parser.add_argument(
         "-g",
@@ -238,16 +239,17 @@ async def main():
 
     # Banner display
     print("=" * 65)
-    print("Saveit - Telegram Timed Media Saver & Group Tutorial Forwarder")
+    print(f"{branding.get_name()} v{branding.get_version()} - {branding.get_description()}")
+    print(f"Author: {branding.get_author()} | {branding.get_copyright()}")
     print("=" * 65)
 
     try:
         await engine.start()
         print("=" * 65)
-        print("Saveit is active and listening for messages. Press Ctrl+C to stop.")
+        print(f"{branding.get_name()} is active and listening for messages. Press Ctrl+C to stop.")
         await engine.run_until_stopped()
     except KeyboardInterrupt:
-        print("\n[Saveit] Stopped by user (Ctrl+C). Goodbye!")
+        print(f"\n[{branding.get_name()}] Stopped by user (Ctrl+C). Goodbye!")
     finally:
         await engine.stop()
 
