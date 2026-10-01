@@ -20,6 +20,7 @@ from engine import (
     parse_group_targets,
 )
 from tracker import FileTracker
+import branding
 
 # Set appearance mode and color theme
 ctk.set_appearance_mode("Dark")
@@ -202,9 +203,10 @@ class SaveitGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Saveit — Telegram Media Saver & Group Tutorial Forwarder")
+        self.title(branding.get_title())
         self.geometry("1100x720")
         self.minsize(980, 620)
+        self._apply_app_icon()
 
         # Center on screen
         screen_w = self.winfo_screenwidth()
@@ -242,6 +244,20 @@ class SaveitGUI(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _apply_app_icon(self):
+        """Loads and sets the window icon from branding."""
+        icon_path = branding.get_icon()
+        if icon_path and Path(icon_path).exists():
+            try:
+                if sys.platform == "win32" and icon_path.endswith(".ico"):
+                    self.iconbitmap(icon_path)
+                else:
+                    from PIL import Image, ImageTk
+                    self._icon_img = ImageTk.PhotoImage(Image.open(icon_path))
+                    self.wm_iconphoto(True, self._icon_img)
+            except Exception:
+                pass
+
     def _ensure_env_file(self):
         """Ensures .env exists, copying from .env.example if necessary."""
         if not ENV_PATH.exists() and ENV_EXAMPLE_PATH.exists():
@@ -266,14 +282,14 @@ class SaveitGUI(ctk.CTk):
         # App Brand
         brand_label = ctk.CTkLabel(
             self.sidebar_frame,
-            text="💾 Saveit",
+            text=f"💾 {branding.get_name()}",
             font=ctk.CTkFont(size=22, weight="bold"),
         )
         brand_label.grid(row=0, column=0, padx=20, pady=(20, 2), sticky="w")
 
         brand_sub = ctk.CTkLabel(
             self.sidebar_frame,
-            text="Telegram Userbot",
+            text=branding.get_subtitle(),
             font=ctk.CTkFont(size=12),
             text_color="gray60",
         )
@@ -1131,15 +1147,16 @@ class SaveitGUI(ctk.CTk):
         # Title
         t_lbl = ctk.CTkLabel(
             scroll,
-            text="Saveit — Telegram Timed Media Saver & Tutorial Forwarder",
+            text=branding.get_title(),
             font=ctk.CTkFont(size=18, weight="bold"),
         )
         t_lbl.pack(anchor="w", padx=20, pady=(20, 5))
 
         desc = (
-            "Saveit is an automated Telegram userbot that preserves disappearing media, "
-            "intercepts self-destructing photos/videos, and auto-forwards lessons, code tutorials, "
-            "and materials from your monitored groups directly into your Saved Messages.\n\n"
+            f"{branding.get_description()}\n\n"
+            f"• Application: {branding.get_name()} (v{branding.get_version()})\n"
+            f"• Vendor / Author: {branding.get_author()}\n"
+            f"• Legal: {branding.get_copyright()}\n\n"
             "Key Features:\n"
             "• Timed Media Preservation: Intercepts self-destructing media immediately upon arrival.\n"
             "• Restricted Content Bypass: Falls back to re-uploading original files if forward is restricted.\n"

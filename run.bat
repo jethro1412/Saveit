@@ -29,7 +29,7 @@ echo.
 echo Select Mode to Launch:
 echo  [1] Windows GUI Application (Recommended)
 echo  [2] CLI Console Mode
-echo  [3] Build Standalone Windows .exe (PyInstaller)
+echo  [3] Build Standalone Executable (GUI, CLI, or Custom Branding)
 echo.
 set /p MODE_CHOICE="Enter selection [1, 2, or 3] (default 1): "
 
@@ -47,7 +47,7 @@ IF "%MODE_CHOICE%"=="2" (
     )
     python Saveit.py
 ) ELSE IF "%MODE_CHOICE%"=="3" (
-    call build_exe.bat
+    call build.bat --interactive
 ) ELSE (
     echo Launching Windows GUI...
     pythonw gui.py >nul 2>&1
